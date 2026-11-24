@@ -1,0 +1,255 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080d18">
+<title>Rohail Scalper Pro</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#080d18;color:#eaf0ff;font-family:Arial,sans-serif;padding:18px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+h1{font-size:23px;margin:0;color:#58d6ff}
+small,.muted{color:#8290aa}
+.panel{background:#111a2b;border:1px solid #25334b;border-radius:14px;padding:15px;margin:12px 0}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+button,select,input{background:#1a2940;color:white;border:1px solid #354968;padding:11px;border-radius:9px}
+button{cursor:pointer}
+button.active{background:#087eaa;border-color:#26cfff}
+button:disabled{opacity:.5}
+select,input{max-width:100%}
+.stat{font-size:12px;color:#91a2bd}
+.price{font-size:25px;font-weight:bold;margin:8px 0}
+.signal{font-size:24px;font-weight:bold;margin:12px 0}
+.buy{color:#35e39b}.sell{color:#ff687b}.wait{color:#ffc65c}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:10px 5px;border-bottom:1px solid #293750}
+#status{font-size:12px;color:#9cb0ca}
+#results{overflow-x:auto}
+footer{font-size:11px;color:#8190a8;line-height:1.6;margin-top:20px}
+</style>
+</head>
+<body>
+<header>
+ <div><h1>ROHAIL SCALPER PRO</h1><small>REAL MARKET • SMC SCANNER</small></div>
+ <div id="clock" class="stat">Connecting...</div>
+</header>
+
+<div class="panel">
+ <div class="row">
+  <button class="active tab" data-type="Forex">Forex</button>
+  <button class="tab" data-type="Commodity">Commodities</button>
+  <button class="tab" data-type="Index">Indices</button>
+ </div>
+ <p class="stat">Crypto and OTC are excluded.</p>
+ <div class="row">
+  <input id="search" placeholder="Search pair e.g. EURUSD">
+  <button id="refresh">Refresh</button>
+ </div>
+ <p id="status">Loading real-market instruments...</p>
+ <select id="symbol" style="width:100%"></select>
+</div>
+
+<div class="panel">
+ <div class="stat">SELECTED INSTRUMENT</div>
+ <h2 id="pair">Loading...</h2>
+ <div class="price" id="price">--</div>
+ <div class="stat" id="marketState">Waiting for market data</div>
+ <hr style="border-color:#293750">
+ <div class="stat">SMC ANALYSIS • 1 MIN + 5 MIN</div>
+ <div id="signal" class="signal wait">WAIT</div>
+ <div id="reason" class="stat">Waiting for candle data...</div>
+ <p class="stat" id="levels"></p>
+ <button id="analyze">Analyze Selected Pair</button>
+</div>
+
+<div class="panel">
+ <div class="row" style="justify-content:space-between">
+  <b>Automatic Scanner</b>
+  <span id="scanStatus" class="stat">Stopped</span>
+ </div>
+ <p class="stat">Automatic scanning every 60 seconds. Scans the selected market category.</p>
+ <div class="row">
+  <button id="start">Start Auto Scan</button>
+  <button id="stop">Stop</button>
+ </div>
+ <p class="stat" id="count">0 instruments scanned</p>
+</div>
+
+<div class="panel">
+ <b>Scanner Results</b>
+ <div id="results">
+ <table>
+  <thead><tr><th>Pair</th><th>Price</th><th>Signal</th></tr></thead>
+  <tbody id="tbody"><tr><td colspan="3">No results yet</td></tr></tbody>
+ </table>
+ </div>
+</div>
+
+<footer>
+Data source: BiQuote public market-data API. Signals are heuristic candle-based interpretations of market structure, liquidity sweeps, FVG and order-block concepts. They are not guaranteed predictions or financial advice. Always verify prices and risk before trading. Live data depends on provider availability and market hours.
+</footer>
+
+<script>
+const API="https://biquote.io/api";
+let allSymbols=[], currentType="Forex", timer=null, busy=false;
+let lastResults=[];
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function getJSON(url){
+ const r=await fetch(url);
+ if(!r.ok) throw new Error("API error "+r.status);
+ return r.json();
+}
+
+async function loadSymbols(){
+ $("status").textContent="Loading instruments...";
+ try{
+  const data=await getJSON(API+"/symbols?quotedWithinDays=7");
+  allSymbols=(Array.isArray(data)?data:data.items||data.symbols||[])
+   .filter(s=>["Forex","Commodity","Index"].includes(s.type))
+   .filter(s=>s.type!=="Crypto");
+  showSymbols();
+  $("status").textContent=allSymbols.length+" real-market instruments found. Live quotes depend on market availability.";
+ }catch(e){
+  $("status").textContent="Could not load instruments. Check internet and try Refresh.";
+ }
+}
+
+function showSymbols(){
+ const q=$("search").value.trim().toLowerCase();
+ const list=allSymbols.filter(s=>s.type===currentType)
+ .filter(s=>(s.name+" "+(s.description||"")).toLowerCase().includes(q));
+ $("symbol").innerHTML=list.map(s=>`<option value="${esc(s.name)}">${esc(s.name)} — ${esc(s.description||"")}</option>`).join("");
+ if(!list.length) $("symbol").innerHTML='<option value="">No instruments found</option>';
+ if(list.length) analyzeSelected();
+}
+
+function selected(){return $("symbol").value}
+
+function analyzeCandles(bars){
+ const b=bars.filter(x=>!x.isOpen).slice().reverse();
+ if(b.length<25) return {signal:"WAIT",reason:"Not enough closed candles",score:0};
+ const last=b.at(-1), prev=b.at(-2), older=b.slice(-21,-1);
+ const highs=older.map(x=>+x.high), lows=older.map(x=>+x.low);
+ const swingHigh=Math.max(...highs), swingLow=Math.min(...lows);
+ let buy=0,sell=0,reasons=[];
+ if(last.close>swingHigh){buy+=2;reasons.push("Bullish BOS")}
+ if(last.close<swingLow){sell+=2;reasons.push("Bearish BOS")}
+ if(last.low<swingLow && last.close>swingLow){buy+=2;reasons.push("Liquidity sweep low")}
+ if(last.high>swingHigh && last.close<swingHigh){sell+=2;reasons.push("Liquidity sweep high")}
+ if(last.close>last.open && prev.close<prev.open && last.close>prev.open){buy++;reasons.push("Bullish engulfing")}
+ if(last.close<last.open && prev.close>prev.open && last.close<prev.open){sell++;reasons.push("Bearish engulfing")}
+ const c=b.slice(-10);
+ const avgRange=c.reduce((a,x)=>a+(x.high-x.low),0)/c.length;
+ if(last.close>last.open && last.close-last.open>avgRange*.5){buy++;reasons.push("Strong bullish candle")}
+ if(last.close<last.open && last.open-last.close>avgRange*.5){sell++;reasons.push("Strong bearish candle")}
+ if(buy>=3 && buy>sell) return {signal:"BUY",reason:reasons.join(" • "),score:buy};
+ if(sell>=3 && sell>buy) return {signal:"SELL",reason:reasons.join(" • "),score:sell};
+ return {signal:"WAIT",reason:reasons.join(" • ")||"No clear market structure",score:Math.max(buy,sell)};
+}
+
+async function candles(symbol,interval){
+ const d=await getJSON(`${API}/${encodeURIComponent(symbol)}/ohlc?interval=${interval}&limit=100`);
+ return d.bars||[];
+}
+
+async function quote(symbol){
+ return getJSON(`${API}/${encodeURIComponent(symbol)}?allowStale=false`);
+}
+
+async function analyzeOne(symbol){
+ const [one,five,q]=await Promise.all([
+  candles(symbol,"1m"),candles(symbol,"5m"),quote(symbol)
+ ]);
+ const a=analyzeCandles(one), b=analyzeCandles(five);
+ let signal="WAIT",reason=[];
+ if(a.signal===b.signal && a.signal!=="WAIT") signal=a.signal;
+ else reason.push("1m/5m confirmation mismatch");
+ if(a.reason) reason.push("1m: "+a.reason);
+ if(b.reason) reason.push("5m: "+b.reason);
+ return {symbol,price:q.mid??q.bid,signal,reason:reason.join(" | "),quote:q};
+}
+
+async function analyzeSelected(){
+ const s=selected();
+ if(!s)return;
+ $("pair").textContent=s;
+ $("signal").textContent="ANALYZING...";
+ $("signal").className="signal wait";
+ try{
+  const r=await analyzeOne(s);
+  $("price").textContent=r.price==null?"--":Number(r.price).toPrecision(8);
+  $("marketState").textContent=(r.quote.marketState||"Unknown")+" • "+(r.quote.source||"Market feed");
+  $("signal").textContent=r.signal;
+  $("signal").className="signal "+r.signal.toLowerCase();
+  $("reason").textContent=r.reason;
+  $("levels").textContent="1m + 5m confirmation required. Signal expiry is not guaranteed.";
+ }catch(e){
+  $("signal").textContent="WAIT";
+  $("signal").className="signal wait";
+  $("reason").textContent="Live data unavailable: "+e.message;
+ }
+}
+
+async function scanAll(){
+ if(busy)return;
+ busy=true;
+ $("scanStatus").textContent="Scanning...";
+ const list=allSymbols.filter(s=>s.type===currentType);
+ let output=[],index=0,done=0;
+ async function worker(){
+  while(index<list.length){
+   const item=list[index++];
+   try{
+    const r=await analyzeOne(item.name);
+    output.push(r);
+   }catch(e){}
+   done++;
+   $("count").textContent=done+" / "+list.length+" instruments checked";
+  }
+ }
+ try{
+  await Promise.all(Array.from({length:6},worker));
+  output.sort((a,b)=>(b.signal!=="WAIT")-(a.signal!=="WAIT"));
+  lastResults=output;
+  $("tbody").innerHTML=output.map(r=>`<tr><td>${esc(r.symbol)}</td><td>${r.price==null?"--":Number(r.price).toPrecision(7)}</td><td class="${r.signal.toLowerCase()}">${r.signal}</td></tr>`).join("")||'<tr><td colspan="3">No live results</td></tr>';
+  $("scanStatus").textContent="Scan complete";
+ }catch(e){
+  $("scanStatus").textContent="Scan error";
+ }
+ busy=false;
+}
+
+function startScan(){
+ if(timer)clearInterval(timer);
+ scanAll();
+ timer=setInterval(scanAll,60000);
+ $("scanStatus").textContent="Auto scan ON • 60 sec";
+}
+function stopScan(){
+ if(timer)clearInterval(timer);
+ timer=null;
+ $("scanStatus").textContent="Stopped";
+}
+
+document.querySelectorAll(".tab").forEach(btn=>btn.addEventListener("click",()=>{
+ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+ btn.classList.add("active");
+ currentType=btn.dataset.type;
+ showSymbols();
+}));
+$("search").addEventListener("input",showSymbols);
+$("symbol").addEventListener("change",analyzeSelected);
+$("refresh").addEventListener("click",loadSymbols);
+$("analyze").addEventListener("click",analyzeSelected);
+$("start").addEventListener("click",startScan);
+$("stop").addEventListener("click",stopScan);
+setInterval(()=>$("clock").textContent=new Date().toLocaleTimeString(),1000);
+loadSymbols();
+</script>
+</body>
+</html>
